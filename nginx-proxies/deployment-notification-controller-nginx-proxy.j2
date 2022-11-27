@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-controller-nginx-proxy
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/instance: flux-system
+spec:
+  replicas: {{ flux_deployment_replicas }}
+  selector:
+    matchLabels:
+      app: notification-controller-nginx
+  template:
+    metadata:
+      labels:
+        app: notification-controller-nginx
+    spec:
+      tolerations:
+      - key: node.kubernetes.io/not-ready
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - notification-controller
+            topologyKey: kubernetes.io/hostname
+      hostNetwork: true
+      dnsPolicy: Default
+      nodeSelector:
+        kubernetes.io/os: linux
+      priorityClassName: system-node-critical
+      containers:
+      - name: nginx-proxy
+        image: registry.trendyol.com/platform/base/image/library/nginx:1.23.0-alpine
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 25m
+            memory: 32M
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 22586
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 22586
+        volumeMounts:
+        - mountPath: /etc/nginx
+          name: notification-controller-nginx-proxy-volume
+          readOnly: true
+      volumes:
+      - configMap:
+          defaultMode: 420
+          items:
+          - key: nginx.conf
+            path: nginx.conf
+          name: notification-controller-nginx-proxy
+        name: notification-controller-nginx-proxy-volume

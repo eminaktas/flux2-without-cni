@@ -1,0 +1,311 @@
+resources:
+{% for file in second_resources.files %}
+  - flux-resources/{{ file.path | basename }}
+{% endfor %}
+  - nginx-proxies/configmap-notification-controller-nginx-proxy.yaml
+  - nginx-proxies/configmap-source-controller-nginx-proxy.yaml
+  - nginx-proxies/deployment-notification-controller-nginx-proxy.yaml
+  - nginx-proxies/deployment-source-controller-nginx-proxy.yaml
+
+patches:
+  - target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/part-of=flux
+    patch: |-
+      - op: replace
+        path: /spec/strategy
+        value:
+          type: Recreate
+
+      - op: replace
+        path: /spec/template/spec/hostNetwork
+        value: true
+
+      - op: remove
+        path: /spec/template/spec/containers/0/ports
+
+      - op: remove
+        path: /spec/template/spec/containers/0/livenessProbe
+
+      - op: remove
+        path: /spec/template/spec/containers/0/readinessProbe
+
+      - op: remove
+        path: /spec/template/spec/containers/0/args
+
+      - op: add
+        path: /spec/template/spec/tolerations
+        value:
+          - key: node.kubernetes.io/not-ready
+          - key: node-role.kubernetes.io/master
+            operator: Exists
+            effect: NoSchedule
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+            effect: NoSchedule
+
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: KUBERNETES_SERVICE_HOST
+          value: "127.0.0.1"
+
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: KUBERNETES_SERVICE_PORT
+          value: "6443"
+
+  - target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/part-of=flux
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: all
+      spec:
+        template:
+          spec:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: node-role.kubernetes.io/master
+                      operator: Exists
+                    - key: node-role.kubernetes.io/control-plane
+                      operator: Exists
+
+  - target:
+      kind: Deployment
+      name: source-controller
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: all
+      spec:
+        replicas: {{ flux_deployment_replicas }}
+        template:
+          metadata:
+            annotations:
+              prometheus.io/port: "22570"
+          spec:
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                      - source-controller
+                  topologyKey: "kubernetes.io/hostname"
+            containers:
+            - args:
+              - --events-addr=http://127.0.0.1:22585
+              - --storage-adv-addr=http://127.0.0.1:22575
+              - --storage-addr=:22571
+              - --metrics-addr=:22570
+              - --health-addr=:22572
+              - --watch-all-namespaces=true
+              - --log-level=info
+              - --log-encoding=json
+              - --enable-leader-election
+              - --storage-path=/data
+              name: manager
+              ports:
+              - containerPort: 22571
+                name: http
+                protocol: TCP
+              - containerPort: 22570
+                name: http-prom
+                protocol: TCP
+              - containerPort: 22572
+                name: healthz
+                protocol: TCP
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: healthz
+                timeoutSeconds: 5
+                initialDelaySeconds: 5
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: healthz
+                timeoutSeconds: 5
+                initialDelaySeconds: 5
+
+  - target:
+      kind: Deployment
+      name: notification-controller
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: all
+      spec:
+        replicas: {{ flux_deployment_replicas }}
+        template:
+          metadata:
+            annotations:
+              prometheus.io/port: "22580"
+          spec:
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                      - notification-controller
+                  topologyKey: "kubernetes.io/hostname"
+            containers:
+            - args:
+              - --receiverAddr=:22582
+              - --events-addr=:22581
+              - --metrics-addr=:22580
+              - --health-addr=:22583
+              - --watch-all-namespaces=true
+              - --log-level=info
+              - --log-encoding=json
+              - --enable-leader-election
+              name: manager
+              ports:
+              - containerPort: 22581
+                name: http
+                protocol: TCP
+              - containerPort: 22582
+                name: http-webhook
+                protocol: TCP
+              - containerPort: 22580
+                name: http-prom
+                protocol: TCP
+              - containerPort: 22583
+                name: healthz
+                protocol: TCP
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: healthz
+                timeoutSeconds: 5
+                initialDelaySeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: healthz
+                timeoutSeconds: 5
+                initialDelaySeconds: 5
+
+  - target:
+      kind: Deployment
+      name: kustomize-controller
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: all
+      spec:
+        replicas: {{ flux_deployment_replicas }}
+        template:
+          metadata:
+            annotations:
+              prometheus.io/port: "22590"
+          spec:
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                      - kustomize-controller
+                  topologyKey: "kubernetes.io/hostname"
+            containers:
+            - args:
+              - --events-addr=http://127.0.0.1:22581
+              - --metrics-addr=:22590
+              - --health-addr=:22591
+              - --watch-all-namespaces=true
+              - --log-level=info
+              - --log-encoding=json
+              - --enable-leader-election
+              name: manager
+              ports:
+              - containerPort: 22590
+                name: http-prom
+                protocol: TCP
+              - containerPort: 22591
+                name: healthz
+                protocol: TCP
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: healthz
+                timeoutSeconds: 5
+                initialDelaySeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: healthz
+                timeoutSeconds: 5
+                initialDelaySeconds: 5
+
+  - target:
+      kind: Deployment
+      name: helm-controller
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: all
+      spec:
+        replicas: {{ flux_deployment_replicas }}
+        template:
+          metadata:
+            annotations:
+              prometheus.io/port: "22601"
+          spec:
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                      - helm-controller
+                  topologyKey: "kubernetes.io/hostname"
+            containers:
+            - args:
+              - --events-addr=http://127.0.0.1:22581
+              - --metrics-addr=:22601
+              - --health-addr=:22602
+              - --watch-all-namespaces=true
+              - --log-level=info
+              - --log-encoding=json
+              - --enable-leader-election
+              name: manager
+              ports:
+              - containerPort: 22601
+                name: http-prom
+                protocol: TCP
+              - containerPort: 22602
+                name: healthz
+                protocol: TCP
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: healthz
+                timeoutSeconds: 5
+                initialDelaySeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: healthz
+                timeoutSeconds: 5
+                initialDelaySeconds: 5

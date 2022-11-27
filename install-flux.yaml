@@ -1,0 +1,98 @@
+---
+- name: Install Flux without CNI
+  hosts: localhost
+  vars:
+    flux_version: "v0.36.0"
+  tasks:
+    - name: Create a temporary folder
+      tempfile:
+        state: directory
+      register: tmpfolder
+
+    - name: Generate flux resources for {{ flux_version }}
+      shell: "flux install --version {{ flux_version }} --export > {{ tmpfolder.path }}/generated.yaml"
+
+    - name: Seperate resources with kubectl-slice
+      shell: |
+        kubectl-slice -f {{ tmpfolder.path }}/generated.yaml -o {{ tmpfolder.path }}/flux-resources
+        rm {{ tmpfolder.path }}/generated.yaml
+
+    # Resources need to be ordered due to customresources, and serviceaccounts have to go first in the cluster.
+    - name: Generate resource list - 1
+      find:
+        path: "{{ tmpfolder.path }}/flux-resources"
+        file_type: file
+        use_regex: false
+        patterns: 'customresource*.yaml,serviceaccount*.yaml'
+      register: first_resources
+
+    - name: Generate resource list - 2
+      find:
+        path: "{{ tmpfolder.path }}/flux-resources"
+        file_type: file
+        use_regex: false
+        excludes: 'customresource*.yaml,serviceaccount*.yaml'
+      register: second_resources
+
+    - name: Create flux-system namespace
+      k8s:
+        name: flux-system
+        api_version: v1
+        kind: Namespace
+        state: present
+
+    # Even if resources are ordered, it throws an error if all resources are applied to the Kubernetes cluster with customization.
+    # So, we will add first_resources to the K8s cluster first with kubectl.
+    - name: Apply custom resource and service account definitions
+      k8s:
+        src: "{{ tmpfolder.path }}/flux-resources/{{ item.path | basename }}"
+        state: present
+        apply: true
+      with_items:
+        - "{{ first_resources.files }}"
+
+    - name: Get Kubernetes control plane count
+      shell: |
+        kubectl get node --selector='node-role.kubernetes.io/control-plane' --no-headers | wc -l
+      register: shell_output
+
+    - name: Set flux_deployment_replicas count as Kubernetes control plane count
+      set_fact:
+        flux_deployment_replicas: "{{ shell_output.stdout | trim }}"
+
+    - name: kustomization template
+      template:
+        src: "kustomization.j2"
+        dest: "{{ tmpfolder.path }}/kustomization.yaml"
+
+    - name: Get master node IPs
+      shell: |
+        kubectl get node --selector='node-role.kubernetes.io/control-plane' \
+          -o jsonpath='{$.items[*].status.addresses[?(@.type=="InternalIP")].address}'
+      register: shell_output
+
+    - name: Create k8s_master_ips list
+      set_fact:
+        k8s_master_ips: "{{ shell_output.stdout | split(' ') }}"
+
+    - name: Ensure nginx-proxies folder exists
+      file:
+        path: "{{ tmpfolder.path }}/nginx-proxies"
+        state: directory
+
+    - name: nginx-proxy resources template
+      template:
+        src: "nginx-proxies/{{ item }}.j2"
+        dest: "{{ tmpfolder.path }}/nginx-proxies/{{ item }}.yaml"
+      with_items:
+        - "configmap-notification-controller-nginx-proxy"
+        - "deployment-notification-controller-nginx-proxy"
+        - "configmap-source-controller-nginx-proxy"
+        - "deployment-source-controller-nginx-proxy"
+
+    - name: Deploy flux manifest with kustomize
+      k8s:
+        definition: "{{ lookup('kubernetes.core.kustomize', dir=tmpfolder.path) }}"
+        state: present
+        wait: false
+        apply: yes
